@@ -8,7 +8,10 @@ DB_PATH = os.getenv("DATABASE_URL", "app.db").replace("sqlite:///./", "")
 # Session string encryption — key must be stable across restarts
 _raw_key = os.getenv("SESSION_ENCRYPTION_KEY", "")
 if _raw_key:
-    _fernet = Fernet(_raw_key.encode() if isinstance(_raw_key, str) else _raw_key)
+    # Re-add padding that env vars / copy-paste sometimes strip
+    _key_bytes = _raw_key.encode() if isinstance(_raw_key, str) else _raw_key
+    _key_bytes += b"=" * (-len(_key_bytes) % 4)
+    _fernet = Fernet(_key_bytes)
 else:
     # Fallback: derive from API hash so it's at least consistent per deployment
     import base64, hashlib
