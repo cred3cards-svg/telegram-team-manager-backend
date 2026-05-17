@@ -16,19 +16,17 @@ else:
     _fernet = Fernet(base64.urlsafe_b64encode(hashlib.sha256(_seed.encode()).digest()))
 
 
-def encrypt_session(session_string: str) -> str:
-    if not session_string:
-        return ""
-    return _fernet.encrypt(session_string.encode()).decode()
+def encrypt_session(s: str) -> str:
+    return _fernet.encrypt(s.encode()).decode() if s else ""
 
 
-def decrypt_session(encrypted: str) -> str:
-    if not encrypted:
+def decrypt_session(s: str) -> str:
+    if not s:
         return ""
     try:
-        return _fernet.decrypt(encrypted.encode()).decode()
+        return _fernet.decrypt(s.encode()).decode()
     except Exception:
-        return encrypted  # legacy plaintext
+        return s  # legacy plaintext
 
 
 # ── Backend detection ─────────────────────────────────────────────────────────
@@ -39,58 +37,142 @@ USE_POSTGRES = _DATABASE_URL.startswith("postgres")
 if USE_POSTGRES:
     import psycopg2
     import psycopg2.extras
-    # Railway sometimes uses postgres:// — psycopg2 needs postgresql://
     _PG_DSN = _DATABASE_URL.replace("postgres://", "postgresql://", 1)
-    print(f"[db] Using PostgreSQL")
+    print("[db] Backend: PostgreSQL")
 else:
     _DB_PATH = _DATABASE_URL.replace("sqlite:///./", "").replace("sqlite:///", "")
     os.makedirs(os.path.dirname(os.path.abspath(_DB_PATH)), exist_ok=True)
-    print(f"[db] Using SQLite at {_DB_PATH}")
+    print(f"[db] Backend: SQLite at {_DB_PATH}")
 
 
-# ── PostgreSQL connection wrapper (looks like sqlite3 to the rest of the app) ─
+# ── Schema statements (each runs independently) ───────────────────────────────
+
+_TABLES = [
+    """CREATE TABLE IF NOT EXISTS projects (
+        id {serial} PRIMARY KEY,
+        name TEXT NOT NULL,
+        tone TEXT DEFAULT 'casual',
+        context TEXT DEFAULT ''
+    )""",
+    """CREATE TABLE IF NOT EXISTS accounts (
+        id {serial} PRIMARY KEY,
+        project_id INTEGER REFERENCES projects(id),
+        phone TEXT NOT NULL UNIQUE,
+        session_string TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',
+        personality TEXT DEFAULT '',
+        job_description TEXT DEFAULT ''
+    )""",
+    """CREATE TABLE IF NOT EXISTS chats (
+        id {serial} PRIMARY KEY,
+        account_id INTEGER REFERENCES accounts(id),
+        chat_id TEXT NOT NULL,
+        chat_name TEXT DEFAULT '',
+        type TEXT DEFAULT 'dm',
+        last_message TEXT DEFAULT '',
+        unread_count INTEGER DEFAULT 0,
+        monitored INTEGER DEFAULT 1,
+        UNIQUE(account_id, chat_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS messages (
+        id {serial} PRIMARY KEY,
+        chat_id INTEGER REFERENCES chats(id),
+        sender TEXT NOT NULL,
+        text TEXT NOT NULL,
+        timestamp TEXT NOT NULL,
+        is_outgoing INTEGER DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS ai_drafts (
+        id {serial} PRIMARY KEY,
+        message_id INTEGER REFERENCES messages(id),
+        draft_text TEXT NOT NULL,
+        category TEXT DEFAULT 'general',
+        urgency TEXT DEFAULT 'medium',
+        was_used INTEGER DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS away_log (
+        id {serial} PRIMARY KEY,
+        project_id INTEGER REFERENCES projects(id),
+        account_id INTEGER REFERENCES accounts(id),
+        chat_id TEXT NOT NULL,
+        chat_name TEXT DEFAULT '',
+        incoming_text TEXT NOT NULL,
+        reply_text TEXT NOT NULL,
+        category TEXT DEFAULT 'general',
+        urgency TEXT DEFAULT 'medium',
+        replied_at TEXT NOT NULL,
+        reviewed INTEGER DEFAULT 0
+    )""",
+    """CREATE TABLE IF NOT EXISTS away_sessions (
+        id {serial} PRIMARY KEY,
+        project_id INTEGER UNIQUE REFERENCES projects(id),
+        away_until TEXT NOT NULL,
+        enabled_at TEXT NOT NULL,
+        target_mode TEXT DEFAULT 'all',
+        target_chat_ids TEXT DEFAULT '[]'
+    )""",
+    """CREATE TABLE IF NOT EXISTS suggested_groups (
+        id {serial} PRIMARY KEY,
+        group_id TEXT NOT NULL UNIQUE,
+        username TEXT DEFAULT '',
+        name TEXT NOT NULL,
+        description TEXT DEFAULT '',
+        members INTEGER DEFAULT 0,
+        online_members INTEGER DEFAULT 0,
+        category TEXT DEFAULT 'general',
+        discovered_at TEXT NOT NULL
+    )""",
+]
+
+
+def init_db():
+    """Create all tables. Each statement runs in its own transaction so one
+    failure never blocks the rest."""
+    if USE_POSTGRES:
+        serial = "SERIAL"
+        seed_sql = """INSERT INTO projects (id, name, tone, context)
+                      VALUES (1, 'Default Project', 'casual', 'General team communication project')
+                      ON CONFLICT (id) DO NOTHING"""
+    else:
+        serial = "INTEGER"
+        seed_sql = """INSERT OR IGNORE INTO projects (id, name, tone, context)
+                      VALUES (1, 'Default Project', 'casual', 'General team communication project')"""
+
+    for tpl in _TABLES:
+        sql = tpl.replace("{serial}", serial)
+        try:
+            with get_conn() as conn:
+                conn.execute(sql)
+        except Exception as e:
+            print(f"[db] init warning: {e}")
+
+    try:
+        with get_conn() as conn:
+            conn.execute(seed_sql)
+    except Exception as e:
+        print(f"[db] seed warning: {e}")
+
+    # Log account count so we know the DB is alive
+    try:
+        with get_conn() as conn:
+            n = conn.execute("SELECT COUNT(*) as n FROM accounts").fetchone()["n"]
+            print(f"[db] init complete — {n} accounts in database")
+    except Exception as e:
+        print(f"[db] count check failed: {e}")
+
+
+# ── PostgreSQL row wrapper (makes psycopg2 rows behave like sqlite3.Row) ──────
 
 class _PGConn:
-    """Wraps a psycopg2 connection to mimic sqlite3's interface."""
-
     def __init__(self):
         self._conn = psycopg2.connect(_PG_DSN)
+        self._conn.autocommit = False
         self._cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        self._last_id = None
-
-    # ── Core execute ──────────────────────────────────────────────────────────
 
     def execute(self, sql: str, params=()):
         sql = sql.replace("?", "%s")
-        # last_insert_rowid() → use stored id from previous INSERT
-        if "last_insert_rowid()" in sql:
-            sql = sql.replace("last_insert_rowid()", str(self._last_id or 0))
         self._cur.execute(sql, params)
-        # Track last inserted ID for SERIAL columns
-        if sql.strip().upper().startswith("INSERT"):
-            try:
-                self._cur.execute("SELECT lastval()")
-                row = self._cur.fetchone()
-                self._last_id = row["lastval"] if row else None
-            except Exception:
-                pass
         return self
-
-    def executescript(self, sql: str):
-        """Run multiple semicolon-separated statements."""
-        for stmt in sql.split(";"):
-            stmt = stmt.strip()
-            if stmt:
-                try:
-                    self._cur.execute(stmt)
-                except psycopg2.errors.DuplicateTable:
-                    self._conn.rollback()
-                    # Re-open cursor after rollback
-                    self._cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                except Exception:
-                    pass  # IF NOT EXISTS handles most cases
-
-    # ── Fetch ─────────────────────────────────────────────────────────────────
 
     def fetchone(self):
         try:
@@ -104,8 +186,6 @@ class _PGConn:
         except Exception:
             return []
 
-    # ── Transaction ───────────────────────────────────────────────────────────
-
     def commit(self):
         self._conn.commit()
 
@@ -118,159 +198,6 @@ class _PGConn:
             self._conn.close()
         except Exception:
             pass
-
-    # ── Utility ───────────────────────────────────────────────────────────────
-
-    def __getitem__(self, key):
-        return self._cur.fetchone()[key]
-
-
-# ── Schema ────────────────────────────────────────────────────────────────────
-
-_SCHEMA_SQLITE = """
-    CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        tone TEXT DEFAULT 'casual',
-        context TEXT DEFAULT ''
-    );
-    CREATE TABLE IF NOT EXISTS accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id INTEGER REFERENCES projects(id),
-        phone TEXT NOT NULL UNIQUE,
-        session_string TEXT DEFAULT '',
-        status TEXT DEFAULT 'pending',
-        personality TEXT DEFAULT '',
-        job_description TEXT DEFAULT ''
-    );
-    CREATE TABLE IF NOT EXISTS chats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        account_id INTEGER REFERENCES accounts(id),
-        chat_id TEXT NOT NULL,
-        chat_name TEXT DEFAULT '',
-        type TEXT DEFAULT 'dm',
-        last_message TEXT DEFAULT '',
-        unread_count INTEGER DEFAULT 0,
-        monitored INTEGER DEFAULT 1,
-        UNIQUE(account_id, chat_id)
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chat_id INTEGER REFERENCES chats(id),
-        sender TEXT NOT NULL,
-        text TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        is_outgoing INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS ai_drafts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id INTEGER REFERENCES messages(id),
-        draft_text TEXT NOT NULL,
-        category TEXT DEFAULT 'general',
-        urgency TEXT DEFAULT 'medium',
-        was_used INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS away_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id INTEGER REFERENCES projects(id),
-        account_id INTEGER REFERENCES accounts(id),
-        chat_id TEXT NOT NULL,
-        chat_name TEXT DEFAULT '',
-        incoming_text TEXT NOT NULL,
-        reply_text TEXT NOT NULL,
-        category TEXT DEFAULT 'general',
-        urgency TEXT DEFAULT 'medium',
-        replied_at TEXT NOT NULL,
-        reviewed INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS away_sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id INTEGER UNIQUE REFERENCES projects(id),
-        away_until TEXT NOT NULL,
-        enabled_at TEXT NOT NULL,
-        target_mode TEXT DEFAULT 'all',
-        target_chat_ids TEXT DEFAULT '[]'
-    );
-    INSERT OR IGNORE INTO projects (id, name, tone, context)
-    VALUES (1, 'Default Project', 'casual', 'General team communication project');
-"""
-
-_SCHEMA_PG = """
-    CREATE TABLE IF NOT EXISTS projects (
-        id SERIAL PRIMARY KEY,
-        name TEXT NOT NULL,
-        tone TEXT DEFAULT 'casual',
-        context TEXT DEFAULT ''
-    );
-    CREATE TABLE IF NOT EXISTS accounts (
-        id SERIAL PRIMARY KEY,
-        project_id INTEGER REFERENCES projects(id),
-        phone TEXT NOT NULL UNIQUE,
-        session_string TEXT DEFAULT '',
-        status TEXT DEFAULT 'pending',
-        personality TEXT DEFAULT '',
-        job_description TEXT DEFAULT ''
-    );
-    CREATE TABLE IF NOT EXISTS chats (
-        id SERIAL PRIMARY KEY,
-        account_id INTEGER REFERENCES accounts(id),
-        chat_id TEXT NOT NULL,
-        chat_name TEXT DEFAULT '',
-        type TEXT DEFAULT 'dm',
-        last_message TEXT DEFAULT '',
-        unread_count INTEGER DEFAULT 0,
-        monitored INTEGER DEFAULT 1,
-        UNIQUE(account_id, chat_id)
-    );
-    CREATE TABLE IF NOT EXISTS messages (
-        id SERIAL PRIMARY KEY,
-        chat_id INTEGER REFERENCES chats(id),
-        sender TEXT NOT NULL,
-        text TEXT NOT NULL,
-        timestamp TEXT NOT NULL,
-        is_outgoing INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS ai_drafts (
-        id SERIAL PRIMARY KEY,
-        message_id INTEGER REFERENCES messages(id),
-        draft_text TEXT NOT NULL,
-        category TEXT DEFAULT 'general',
-        urgency TEXT DEFAULT 'medium',
-        was_used INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS away_log (
-        id SERIAL PRIMARY KEY,
-        project_id INTEGER REFERENCES projects(id),
-        account_id INTEGER REFERENCES accounts(id),
-        chat_id TEXT NOT NULL,
-        chat_name TEXT DEFAULT '',
-        incoming_text TEXT NOT NULL,
-        reply_text TEXT NOT NULL,
-        category TEXT DEFAULT 'general',
-        urgency TEXT DEFAULT 'medium',
-        replied_at TEXT NOT NULL,
-        reviewed INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS away_sessions (
-        id SERIAL PRIMARY KEY,
-        project_id INTEGER UNIQUE REFERENCES projects(id),
-        away_until TEXT NOT NULL,
-        enabled_at TEXT NOT NULL,
-        target_mode TEXT DEFAULT 'all',
-        target_chat_ids TEXT DEFAULT '[]'
-    );
-    INSERT INTO projects (id, name, tone, context)
-    VALUES (1, 'Default Project', 'casual', 'General team communication project')
-    ON CONFLICT (id) DO NOTHING;
-"""
-
-
-def init_db():
-    with get_conn() as conn:
-        if USE_POSTGRES:
-            conn.executescript(_SCHEMA_PG)
-        else:
-            conn.executescript(_SCHEMA_SQLITE)
 
 
 # ── Connection context manager ────────────────────────────────────────────────
@@ -291,8 +218,6 @@ def get_conn():
     finally:
         conn.close()
 
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def row_to_dict(row):
     return dict(row) if row else None

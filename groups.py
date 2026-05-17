@@ -49,8 +49,9 @@ async def join_group(req: JoinGroupRequest):
 
     with get_conn() as conn:
         conn.execute(
-            """INSERT OR IGNORE INTO chats (account_id, chat_id, chat_name, type, monitored)
-               VALUES (?,?,?,'group',1)""",
+            """INSERT INTO chats (account_id, chat_id, chat_name, type, monitored)
+               VALUES (?,?,?,'group',1)
+               ON CONFLICT(account_id, chat_id) DO NOTHING""",
             (req.account_id, chat_id, chat_name),
         )
         row = conn.execute(
