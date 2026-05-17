@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from telethon import events
@@ -140,11 +140,23 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
 
         # Cap auto-replies at 10 per chat per away session
         reply_count = conn.execute(
-            """SELECT COUNT(*) as n FROM messages WHERE chat_id=? AND is_outgoing=1 AND timestamp >= ?""",
+            "SELECT COUNT(*) as n FROM messages WHERE chat_id=? AND is_outgoing=1 AND timestamp >= ?",
             (chat_row["id"], enabled_at),
         ).fetchone()["n"]
 
+        # Groups: extra limit — max 2 replies per 30 minutes
+        if chat_type == "group":
+            window_start = (datetime.utcnow() - timedelta(minutes=30)).isoformat()
+            group_recent = conn.execute(
+                "SELECT COUNT(*) as n FROM messages WHERE chat_id=? AND is_outgoing=1 AND timestamp >= ?",
+                (chat_row["id"], window_start),
+            ).fetchone()["n"]
+        else:
+            group_recent = 0
+
     if reply_count >= 10:
+        return
+    if chat_type == "group" and group_recent >= 2:
         return
 
     # Fetch project context for AI
