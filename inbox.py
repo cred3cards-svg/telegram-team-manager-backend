@@ -143,7 +143,7 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
     with get_conn() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         recent_msgs = conn.execute(
-            "SELECT sender, text FROM messages WHERE chat_id=? ORDER BY timestamp DESC LIMIT 5",
+            "SELECT sender, text FROM messages WHERE chat_id=? ORDER BY timestamp DESC LIMIT 3",
             (chat_row["id"],),
         ).fetchall()
 
@@ -152,24 +152,20 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
 
     # Generate AI draft using shared build_draft() so persona is respected
     try:
-        from ai import build_draft, parse_ai_response, _fetch_persona
-        persona = _fetch_persona(account_id)
-        system_prompt, user_prompt = build_draft(
+        from ai import build_draft, parse_ai_response
+        system_prompt = build_draft(
             message_text=message_text,
             chat_history=history,
             chat_type="dm",
-            project_context=project.get("context", ""),
-            tone=project.get("tone", "casual"),
-            personality=persona.get("personality", ""),
-            job_description=persona.get("job_description", ""),
         )
-        ai_client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
-        response = ai_client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=200,
+        ai_client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+        response = await ai_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
             system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[{"role": "user", "content": message_text}],
         )
+        print(f"[away] Tokens used: {response.usage.input_tokens} in, {response.usage.output_tokens} out")
         data = parse_ai_response(response.content[0].text)
         draft_text = data.get("draft", "")
     except Exception as e:

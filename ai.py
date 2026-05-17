@@ -7,38 +7,29 @@ from database import get_conn
 
 router = APIRouter()
 
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
 
-SYSTEM_TEMPLATE = """You are a human team member replying to a Telegram message.
-
-Project: {project_context}
-Tone: {tone}
-Chat type: {chat_type}
-{persona_block}
-Given the conversation, output ONLY valid JSON:
-{{"draft":"...","category":"support|sales|general|spam","urgency":"high|medium|low"}}
-
+SYSTEM_PROMPT = """
+Young Indian urban woman, Telegram support team.
+Hinglish tone. Warm, witty, firm.
+Product: OnlyWin - free legal cricket prediction market
+@Owcric_bot = game, @Onlywinme = community
 Rules:
-- Draft max 3 sentences
-- Sound like the specific person described above, not a generic assistant
-- Match their vocabulary, style, and role
-- Never mention AI or that you're automated"""
+- Max 1 handle per message, never both together
+- No URLs ever, handles only
+- Plug only when natural (cricket/money/boredom talk)
+- Max 2-3 sentences, max 2 emojis
+- Abuse: warn once then exit
+- Never sound like an ad or bot
 
-USER_TEMPLATE = """Recent chat:
-{chat_history}
+Output JSON only:
+{{"draft":"...","plug_used":false,"handle_used":null,
+"boundary_triggered":false,"suggested_action":"send"}}
 
-Latest message: {message_text}"""
-
-
-def _persona_block(personality: str, job_description: str) -> str:
-    parts = []
-    if job_description:
-        parts.append(f"Role: {job_description}")
-    if personality:
-        parts.append(f"Personality & style: {personality}")
-    if not parts:
-        return ""
-    return "\n".join(parts) + "\n"
+Context: {chat_type} | plug_used_before: {plug_already_used}
+History: {chat_history}
+Message: {message_text}
+"""
 
 
 def _fetch_persona(account_id: int) -> dict:
@@ -56,40 +47,36 @@ class DraftRequest(BaseModel):
     project_context: str = "General team communication"
     tone: str = "casual"
     message_id: int | None = None
-    account_id: int | None = None   # used to fetch per-account persona
+    account_id: int | None = None
+    plug_already_used: bool = False
 
 
 class DraftResponse(BaseModel):
     draft: str
-    category: str
-    urgency: str
+    plug_used: bool = False
+    handle_used: str | None = None
+    boundary_triggered: bool = False
+    suggested_action: str = "send"
 
 
 def build_draft(
     message_text: str,
     chat_history: list,
     chat_type: str,
-    project_context: str,
-    tone: str,
-    personality: str = "",
-    job_description: str = "",
-) -> tuple[str, str]:
-    """Return (system_prompt, user_prompt)."""
+    plug_already_used: bool = False,
+    **kwargs,  # absorb legacy args (project_context, tone, personality, job_description)
+) -> str:
+    """Return formatted system prompt."""
     history_str = "\n".join(
         f"{m.get('sender', 'User')}: {m.get('text', '')}"
-        for m in chat_history[-5:]
+        for m in chat_history[-3:]
     )
-    system_prompt = SYSTEM_TEMPLATE.format(
-        project_context=project_context,
-        tone=tone,
+    return SYSTEM_PROMPT.format(
         chat_type=chat_type,
-        persona_block=_persona_block(personality, job_description),
-    )
-    user_prompt = USER_TEMPLATE.format(
+        plug_already_used=plug_already_used,
         chat_history=history_str or "(no prior messages)",
         message_text=message_text,
     )
-    return system_prompt, user_prompt
 
 
 def parse_ai_response(raw: str) -> dict:
@@ -100,7 +87,13 @@ def parse_ai_response(raw: str) -> dict:
     try:
         return json.loads(raw.strip())
     except json.JSONDecodeError:
-        return {"draft": raw.strip(), "category": "general", "urgency": "medium"}
+        return {
+            "draft": raw.strip(),
+            "plug_used": False,
+            "handle_used": None,
+            "boundary_triggered": False,
+            "suggested_action": "send",
+        }
 
 
 @router.post("/ai/draft", response_model=DraftResponse)
@@ -108,40 +101,38 @@ async def generate_draft(req: DraftRequest):
     if not os.getenv("ANTHROPIC_API_KEY"):
         raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
 
-    persona = _fetch_persona(req.account_id) if req.account_id else {"personality": "", "job_description": ""}
-
-    system_prompt, user_prompt = build_draft(
+    system_prompt = build_draft(
         message_text=req.message_text,
         chat_history=req.chat_history,
         chat_type=req.chat_type,
-        project_context=req.project_context,
-        tone=req.tone,
-        personality=persona.get("personality", ""),
-        job_description=persona.get("job_description", ""),
+        plug_already_used=req.plug_already_used,
     )
 
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=300,
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=150,
             system=system_prompt,
-            messages=[{"role": "user", "content": user_prompt}],
+            messages=[{"role": "user", "content": req.message_text}],
         )
+        print(f"Tokens used: {response.usage.input_tokens} in, {response.usage.output_tokens} out")
         data = parse_ai_response(response.content[0].text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     result = DraftResponse(
         draft=data.get("draft", ""),
-        category=data.get("category", "general"),
-        urgency=data.get("urgency", "medium"),
+        plug_used=data.get("plug_used", False),
+        handle_used=data.get("handle_used", None),
+        boundary_triggered=data.get("boundary_triggered", False),
+        suggested_action=data.get("suggested_action", "send"),
     )
 
     if req.message_id:
         with get_conn() as conn:
             conn.execute(
                 "INSERT INTO ai_drafts (message_id, draft_text, category, urgency) VALUES (?,?,?,?)",
-                (req.message_id, result.draft, result.category, result.urgency),
+                (req.message_id, result.draft, "general", "medium"),
             )
 
     return result
