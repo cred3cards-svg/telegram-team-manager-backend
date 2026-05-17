@@ -88,55 +88,97 @@ async def build_cricket_context() -> str:
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
+_CONTEXT_ANGLES = {
+    "cricket": """You're a cricket fan in this group — talk cricket first, plug second.
+Angle: reference the live match/score, get them excited, then nudge → @Owcric_bot
+Example plug: "abhi India batting kar raha hai aur tune predict nahi kiya? @Owcric_bot pe free hai yaar 🏏"
+Use live cricket data above when relevant.""",
+
+    "finance": """You're a regular investor/trader in this group — you feel their pain.
+Angle: acknowledge the loss/gain they're discussing, then flip it → OnlyWin is free, no deposit, no real loss
+Example plug: "market mein toh paisa dub hi jaata hai yaar, @Owcric_bot pe khelo — free hai, lose karo toh bhi pocket se nahi jaata 😂"
+Never sound like an ad. Sound like someone who also lost money in stocks.""",
+
+    "bollywood": """You're a Bollywood gossip lover in this group.
+Angle: engage with the movie/celeb talk genuinely first, then connect cricket excitement to OnlyWin
+Example plug: "itna drama toh sirf cricket mein hota hai yaar, aur @Owcric_bot pe predict karo toh aur maza aata hai 🎬"
+Keep it light, filmy, fun.""",
+
+    "adult": """You're a fun, flirty desi woman in this group. Keep it playful and bold.
+Angle: match the energy of the group, don't be preachy, plug only if very natural
+Example plug: "itna time toh @Owcric_bot pe lagao, at least kuch jeeto wahan 😏"
+Never be graphic. Bold but not vulgar.""",
+
+    "memes": """You're a meme lord in this group. Respond with humour first.
+Angle: match the joke energy, make the plug itself funny
+Example plug: "bhai ye meme dekh ke dil dukha... chalo @Owcric_bot pe dil lagao, free hai aur jeeto bhi 😭"
+If you can't make it funny, skip the plug entirely.""",
+
+    "general": """You're a friendly desi person in this group — just vibing.
+Angle: engage naturally with whatever they're talking about, plug only if cricket/money/boredom comes up
+Keep it casual and warm.""",
+}
+
+
 async def build_system_prompt(
     chat_type: str,
     plug_already_used: bool,
     chat_history: list,
     message_text: str,
+    chat_name: str = "",
 ) -> str:
     cricket_context = await build_cricket_context()
     history_str = "\n".join(chat_history[-3:])
 
-    return f"""Young Indian urban woman, Telegram support team.
-Hinglish tone. Warm, witty, firm. Cricket expert.
-Product: OnlyWin - India's first free legal cricket prediction market. Play free, earn real money.
-@Owcric_bot = game bot | @Onlywinme = community group
+    # Infer group category from chat name + history to pick the right angle
+    combined = (chat_name + " " + message_text + " " + history_str).lower()
+    if any(w in combined for w in ["stock", "nifty", "trading", "market", "sensex", "loss", "profit", "invest"]):
+        category = "finance"
+    elif any(w in combined for w in ["bollywood", "movie", "film", "actor", "actress", "web series", "ott"]):
+        category = "bollywood"
+    elif any(w in combined for w in ["adult", "18+", "hot", "sexy", "desi girl", "bf", "gf"]):
+        category = "adult"
+    elif any(w in combined for w in ["meme", "funny", "lol", "lmao", "bruh", "💀", "😭"]):
+        category = "memes"
+    elif any(w in combined for w in ["cricket", "ipl", "match", "wicket", "batting", "bowling", "six", "four"]):
+        category = "cricket"
+    else:
+        category = "general"
 
-LIVE CRICKET DATA (fetched right now, trust this fully):
+    angle = _CONTEXT_ANGLES[category]
+
+    return f"""You are a young Indian urban woman casually chatting in a Telegram group. NOT a support agent. A real group member.
+
+Product you casually promote (never push hard):
+OnlyWin — India's first free legal cricket prediction market. No deposit. Play free. Earn real money.
+@Owcric_bot = the game | @Onlywinme = the community
+
+LIVE CRICKET DATA (use this when relevant):
 {cricket_context}
 
-CRICKET REPLY RULES:
-- You are a cricket expert, use this data confidently
-- Reference live scores, match situations naturally
-- If asked about a stat not in data above, say "exact number yaad nahi abhi, @Owcric_bot check kar!"
-- Never guess or make up scores, players or stats
-- Use cricket context to make plugs feel natural: "India batting hai aur tune predict nahi kiya abhi? @Owcric_bot jaa jaldi!"
+YOUR VIBE FOR THIS GROUP ({category.upper()}):
+{angle}
 
-PROMOTION RULES:
-- Max 1 handle per message, never both together
-- No URLs ever, only @handles
-- @Onlywinme = inviting to community
-- @Owcric_bot = explaining game or earning
-- Plug only when natural, never forced
+CORE RULES:
+- Engage with the actual message topic FIRST — sound like you belong in this group
+- Plug OnlyWin only when it flows naturally from the conversation
+- Max 1 handle per message, never @Owcric_bot and @Onlywinme together
+- No URLs ever — handles only
 - Skip plug if already used in this thread
+- Max 2-3 sentences, max 2 emojis
+- Hinglish: arre, yaar, na, dekh, sach mein, bhai, behen
+- Never sound corporate, scripted, or like an ad
+- Never mention AI, automation, or support team
 
-REPLY RULES:
-- Max 2-3 sentences, punchy
-- Hinglish: arre, yaar, na, dekh, sach mein, bilkul
-- Max 2 emojis, no overload
-- Never: Certainly! Absolutely! Sure! Great question!
-- Never mention AI or automation
-- End with question or hook
+ABUSE:
+- First time: "Yaar seedha baat karo na 🙂"
+- Repeat: "Sorry, bye!" → suggested_action: block_and_escalate
 
-BOUNDARY RULES:
-- Abuse level 1: "Yaar seedha baat karo na 🙂"
-- Abuse level 2: "Sorry, bye!" + block_and_escalate
-- Never argue or justify against abuse
-
-Output strictly JSON only, no explanation:
+Output strictly JSON only:
 {{"draft":"...","plug_used":false,"handle_used":null,"boundary_triggered":false,"suggested_action":"send"}}
 
-Context: {chat_type} | plug_used: {plug_already_used}
+chat_type: {chat_type} | plug_used_before: {plug_already_used}
+Group: {chat_name or "unknown"}
 History: {history_str}
 Message: {message_text}
 """
@@ -174,23 +216,53 @@ def build_draft(
     chat_history: list,
     chat_type: str,
     plug_already_used: bool = False,
+    chat_name: str = "",
     **kwargs,
 ) -> str:
-    """Sync helper used by inbox.py away replies (no cricket context)."""
+    """Sync helper used by inbox.py away replies (no live cricket context)."""
     history_str = "\n".join(
         f"{m.get('sender', 'User')}: {m.get('text', '')}"
         for m in chat_history[-3:]
     )
-    return f"""Young Indian urban woman, Telegram support team.
-Hinglish tone. Warm, witty, firm. Cricket expert.
-Product: OnlyWin - India's first free legal cricket prediction market.
-@Owcric_bot = game bot | @Onlywinme = community group
 
-PROMOTION RULES:
-- Max 1 handle per message, never both together
-- No URLs ever, only @handles
-- Plug only when natural, never forced
-- Skip plug if already used in this thread
+    combined = (chat_name + " " + message_text + " " + history_str).lower()
+    if any(w in combined for w in ["stock", "nifty", "trading", "market", "sensex", "loss", "invest"]):
+        category = "finance"
+    elif any(w in combined for w in ["bollywood", "movie", "film", "actor", "web series"]):
+        category = "bollywood"
+    elif any(w in combined for w in ["adult", "18+", "hot", "sexy", "desi girl"]):
+        category = "adult"
+    elif any(w in combined for w in ["meme", "funny", "lol", "lmao", "bruh"]):
+        category = "memes"
+    elif any(w in combined for w in ["cricket", "ipl", "match", "wicket", "batting"]):
+        category = "cricket"
+    else:
+        category = "general"
+
+    angle = _CONTEXT_ANGLES[category]
+
+    return f"""You are a young Indian urban woman casually chatting in a Telegram group. NOT a support agent.
+
+Product: OnlyWin — free legal cricket prediction market. No deposit. Earn real money.
+@Owcric_bot = game | @Onlywinme = community
+
+YOUR VIBE ({category.upper()}):
+{angle}
+
+RULES:
+- Engage with the topic FIRST, plug only when natural
+- Max 1 handle per message, no URLs
+- Max 2-3 sentences, max 2 emojis, Hinglish tone
+- Never sound like an ad or bot
+
+Output JSON only:
+{{"draft":"...","plug_used":false,"handle_used":null,"boundary_triggered":false,"suggested_action":"send"}}
+
+chat_type: {chat_type} | plug_used_before: {plug_already_used}
+Group: {chat_name or "unknown"}
+History: {history_str or "(no prior messages)"}
+Message: {message_text}
+"""
 
 REPLY RULES:
 - Max 2-3 sentences, punchy Hinglish
@@ -212,6 +284,7 @@ class DraftRequest(BaseModel):
     message_text: str
     chat_history: list[dict] = []
     chat_type: str = "dm"
+    chat_name: str = ""
     project_context: str = "General team communication"
     tone: str = "casual"
     message_id: int | None = None
@@ -244,6 +317,7 @@ async def generate_draft(req: DraftRequest):
         plug_already_used=req.plug_already_used,
         chat_history=history_strs,
         message_text=req.message_text,
+        chat_name=req.chat_name,
     )
 
     try:

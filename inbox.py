@@ -159,6 +159,9 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
     if chat_type == "group" and group_recent >= 2:
         return
 
+    # Resolve chat name early so it's available for the AI prompt
+    chat_name_str = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "") or chat_id
+
     # Fetch project context for AI
     with get_conn() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -177,6 +180,7 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
             message_text=message_text,
             chat_history=history,
             chat_type=chat_type,
+            chat_name=chat_name_str,
         )
         ai_client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
         response = await ai_client.messages.create(
@@ -203,7 +207,6 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
         return
 
     # Store as outgoing message, log the away reply
-    chat_name_str = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "") or chat_id
     with get_conn() as conn:
         chat_row = conn.execute("SELECT * FROM chats WHERE account_id=? AND chat_id=?", (account_id, chat_id)).fetchone()
         if chat_row:
