@@ -81,6 +81,10 @@ async def register_event_handlers(account_id: int, project_id: int):
         sender_entity = await event.get_sender()
         chat_entity = await event.get_chat()
 
+        # Ignore bots entirely — no storage, no reply
+        if getattr(sender_entity, "bot", False):
+            return
+
         is_group = isinstance(chat_entity, (Channel, Chat))
         chat_type = "group" if is_group else "dm"
         chat_id = str(chat_entity.id)
