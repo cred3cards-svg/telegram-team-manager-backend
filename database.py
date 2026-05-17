@@ -164,6 +164,9 @@ def init_db():
     except Exception as e:
         print(f"[db] seed warning: {e}")
 
+    # Backfill project_groups from existing chats so old joins aren't lost
+    _backfill_project_groups()
+
     # Log account count so we know the DB is alive
     try:
         with get_conn() as conn:
@@ -171,6 +174,38 @@ def init_db():
             print(f"[db] init complete — {n} accounts in database")
     except Exception as e:
         print(f"[db] count check failed: {e}")
+
+
+def _backfill_project_groups():
+    """One-time migration: copy any chats (type=group) not yet in project_groups."""
+    import datetime as _dt
+    now = _dt.datetime.utcnow().isoformat()
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                """SELECT c.chat_id, c.chat_name, c.account_id, c.monitored, a.project_id
+                   FROM chats c
+                   JOIN accounts a ON c.account_id = a.id
+                   WHERE c.type = 'group'"""
+            ).fetchall()
+        if not rows:
+            return
+        with get_conn() as conn:
+            for r in rows:
+                try:
+                    conn.execute(
+                        """INSERT INTO project_groups
+                               (project_id, account_id, group_id, group_name, monitored, joined_at)
+                           VALUES (?,?,?,?,?,?)
+                           ON CONFLICT(project_id, group_id) DO NOTHING""",
+                        (r["project_id"], r["account_id"], r["chat_id"],
+                         r["chat_name"], r["monitored"], now),
+                    )
+                except Exception:
+                    pass
+        print(f"[db] backfilled {len(rows)} group(s) into project_groups")
+    except Exception as e:
+        print(f"[db] backfill warning: {e}")
 
 
 # ── PostgreSQL row wrapper (makes psycopg2 rows behave like sqlite3.Row) ──────
