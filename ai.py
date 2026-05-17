@@ -32,7 +32,11 @@ async def fetch_with_cache(endpoint: str, cache_key: str, ttl: int) -> dict:
                     params={"apikey": CRICKETDATA_KEY},
                     timeout=5.0,
                 )
-                cricket_cache[cache_key]["data"] = r.json()
+                payload = r.json()
+                print(f"[cricket] {endpoint} status={r.status_code} keys={list(payload.keys()) if isinstance(payload, dict) else type(payload)}")
+                if isinstance(payload, dict) and payload.get("data"):
+                    print(f"[cricket] {endpoint} returned {len(payload['data'])} items, first={payload['data'][0] if payload['data'] else 'empty'}")
+                cricket_cache[cache_key]["data"] = payload
                 cricket_cache[cache_key]["fetched_at"] = now
         except Exception as e:
             print(f"[cricket] fetch failed ({endpoint}): {e}")
