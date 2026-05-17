@@ -264,19 +264,6 @@ History: {history_str or "(no prior messages)"}
 Message: {message_text}
 """
 
-REPLY RULES:
-- Max 2-3 sentences, punchy Hinglish
-- Max 2 emojis
-- Never mention AI or automation
-
-Output strictly JSON only:
-{{"draft":"...","plug_used":false,"handle_used":null,"boundary_triggered":false,"suggested_action":"send"}}
-
-Context: {chat_type} | plug_used: {plug_already_used}
-History: {history_str or "(no prior messages)"}
-Message: {message_text}
-"""
-
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
