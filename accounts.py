@@ -137,7 +137,11 @@ async def _sync_dialogs(client: TelegramClient, account_id: int):
 def _insert_account(conn, project_id: int, phone: str, session_string: str, status: str) -> dict:
     encrypted = encrypt_session(session_string)
     conn.execute(
-        "INSERT OR REPLACE INTO accounts (project_id, phone, session_string, status) VALUES (?,?,?,?)",
+        """INSERT INTO accounts (project_id, phone, session_string, status) VALUES (?,?,?,?)
+           ON CONFLICT(phone) DO UPDATE SET
+             project_id=EXCLUDED.project_id,
+             session_string=EXCLUDED.session_string,
+             status=EXCLUDED.status""",
         (project_id, phone, encrypted, status),
     )
     row = conn.execute("SELECT * FROM accounts WHERE phone=?", (phone,)).fetchone()

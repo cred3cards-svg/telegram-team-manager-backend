@@ -296,7 +296,7 @@ async def create_project(name: str, tone: str = "casual", context: str = ""):
             "INSERT INTO projects (name, tone, context) VALUES (?,?,?)",
             (name, tone, context),
         )
-        row = conn.execute("SELECT * FROM projects WHERE id=last_insert_rowid()").fetchone()
+        row = conn.execute("SELECT * FROM projects WHERE name=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
     return dict(row)
 
 

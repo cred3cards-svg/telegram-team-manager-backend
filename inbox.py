@@ -38,11 +38,16 @@ def _upsert_chat(conn, account_id: int, chat_id: str, chat_name: str, chat_type:
 
 
 def _insert_message(conn, chat_row_id: int, sender: str, text: str, is_outgoing: bool):
+    ts = datetime.utcnow().isoformat()
     conn.execute(
         "INSERT INTO messages (chat_id, sender, text, timestamp, is_outgoing) VALUES (?,?,?,?,?)",
-        (chat_row_id, sender, text, datetime.utcnow().isoformat(), 1 if is_outgoing else 0),
+        (chat_row_id, sender, text, ts, 1 if is_outgoing else 0),
     )
-    return conn.execute("SELECT last_insert_rowid() as id").fetchone()["id"]
+    row = conn.execute(
+        "SELECT id FROM messages WHERE chat_id=? AND timestamp=? AND sender=? ORDER BY id DESC LIMIT 1",
+        (chat_row_id, ts, sender),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 async def _broadcast(project_id: int, payload: dict):
