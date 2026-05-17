@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import init_db
-from accounts import router as accounts_router, restore_all_sessions, _sync_dialogs, _clients
+from accounts import router as accounts_router, restore_all_sessions, keepalive_all_sessions, _sync_dialogs, _clients
 from groups import router as groups_router
 from inbox import router as inbox_router, register_event_handlers
 from ai import router as ai_router
@@ -31,6 +31,9 @@ async def lifespan(app: FastAPI):
         client = _clients.get(r["phone"])
         if client:
             asyncio.create_task(_sync_dialogs(client, r["id"]))
+
+    # Keep all Telegram sessions alive for the lifetime of the server
+    asyncio.create_task(keepalive_all_sessions())
 
     yield
 

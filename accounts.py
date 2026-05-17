@@ -33,7 +33,12 @@ def _scrub(account: dict) -> dict:
 async def get_or_create_client(phone: str, session_string: str = "") -> TelegramClient:
     if phone in _clients and _clients[phone].is_connected():
         return _clients[phone]
-    client = TelegramClient(StringSession(session_string), API_ID, API_HASH)
+    client = TelegramClient(
+        StringSession(session_string), API_ID, API_HASH,
+        connection_retries=-1,   # retry forever on drops
+        retry_delay=5,           # 5s between retries
+        auto_reconnect=True,
+    )
     await client.connect()
     _clients[phone] = client
     return client
@@ -56,6 +61,36 @@ async def _activate_account(account_id: int, project_id: int, client: TelegramCl
     asyncio.create_task(_sync_dialogs(client, account_id))
     from inbox import register_event_handlers
     asyncio.create_task(register_event_handlers(account_id, project_id))
+
+
+async def keepalive_all_sessions():
+    """Background loop: ping every 4 min, reconnect + re-register if dropped."""
+    from inbox import register_event_handlers
+    while True:
+        await asyncio.sleep(240)  # every 4 minutes
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT id, phone, session_string, project_id FROM accounts WHERE status='active'"
+            ).fetchall()
+        for r in rows_to_list(rows):
+            phone = r["phone"]
+            try:
+                client = _clients.get(phone)
+                if client and client.is_connected():
+                    await client.get_me()   # lightweight ping
+                    print(f"[keepalive] OK: {phone}")
+                else:
+                    print(f"[keepalive] Reconnecting {phone}...")
+                    session = decrypt_session(r["session_string"])
+                    client = await get_or_create_client(phone, session)
+                    if await client.is_user_authorized():
+                        await register_event_handlers(r["id"], r["project_id"])
+                        asyncio.create_task(_sync_dialogs(client, r["id"]))
+                        print(f"[keepalive] Reconnected {phone}")
+                    else:
+                        print(f"[keepalive] Session expired for {phone}")
+            except Exception as e:
+                print(f"[keepalive] Error for {phone}: {e}")
 
 
 async def restore_all_sessions():
