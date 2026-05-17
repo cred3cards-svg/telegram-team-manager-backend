@@ -248,6 +248,20 @@ async def join_suggested_group(req: JoinSuggestedRequest):
                ON CONFLICT(account_id, chat_id) DO NOTHING""",
             (req.account_id, group["group_id"], chat_name),
         )
+        # Persist at project level so it survives account changes
+        acc_row = conn.execute("SELECT project_id FROM accounts WHERE id=?", (req.account_id,)).fetchone()
+        if acc_row:
+            from datetime import datetime
+            conn.execute(
+                """INSERT INTO project_groups
+                       (project_id, account_id, group_id, group_name, username, category, monitored, joined_at)
+                   VALUES (?,?,?,?,?,?,1,?)
+                   ON CONFLICT(project_id, group_id) DO UPDATE SET
+                     account_id=EXCLUDED.account_id""",
+                (acc_row["project_id"], req.account_id, group["group_id"], chat_name,
+                 group.get("username", ""), group.get("category", "general"),
+                 datetime.utcnow().isoformat()),
+            )
 
     return {"status": "joined", "group": chat_name}
 

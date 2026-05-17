@@ -366,10 +366,39 @@ class RemoveRequest(BaseModel):
 @router.delete("/accounts/remove")
 async def remove_account(req: RemoveRequest):
     with get_conn() as conn:
-        row = conn.execute("SELECT phone FROM accounts WHERE id=?", (req.account_id,)).fetchone()
+        row = conn.execute(
+            "SELECT phone, project_id FROM accounts WHERE id=?", (req.account_id,)
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Account not found")
         phone = row["phone"]
+        project_id = row["project_id"]
+
+        # Try to hand group ownership to another active account in the same project
+        other = conn.execute(
+            "SELECT id FROM accounts WHERE project_id=? AND id!=? AND status='active' LIMIT 1",
+            (project_id, req.account_id),
+        ).fetchone()
+
+        if other:
+            # Transfer group chats so the other account can still message them
+            conn.execute(
+                "UPDATE chats SET account_id=? WHERE account_id=? AND type='group'",
+                (other["id"], req.account_id),
+            )
+            # Hand over project_groups ownership
+            conn.execute(
+                "UPDATE project_groups SET account_id=? WHERE project_id=? AND account_id=?",
+                (other["id"], project_id, req.account_id),
+            )
+        else:
+            # No other account — null out account_id so groups stay visible but unassigned
+            conn.execute(
+                "UPDATE project_groups SET account_id=NULL WHERE project_id=? AND account_id=?",
+                (project_id, req.account_id),
+            )
+        # project_groups rows remain — groups are never lost
+
         conn.execute("DELETE FROM accounts WHERE id=?", (req.account_id,))
 
     if phone in _clients:

@@ -122,6 +122,18 @@ _TABLES = [
         category TEXT DEFAULT 'general',
         discovered_at TEXT NOT NULL
     )""",
+    """CREATE TABLE IF NOT EXISTS project_groups (
+        id {serial} PRIMARY KEY,
+        project_id INTEGER REFERENCES projects(id),
+        account_id INTEGER,
+        group_id TEXT NOT NULL,
+        group_name TEXT DEFAULT '',
+        username TEXT DEFAULT '',
+        category TEXT DEFAULT 'general',
+        monitored INTEGER DEFAULT 1,
+        joined_at TEXT NOT NULL,
+        UNIQUE(project_id, group_id)
+    )""",
 ]
 
 
