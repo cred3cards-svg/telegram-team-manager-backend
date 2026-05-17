@@ -106,15 +106,14 @@ async def register_event_handlers(account_id: int, project_id: int):
             "timestamp": msg.date.isoformat(),
         })
 
-        # Away mode: auto-send AI reply for DMs only, once per chat per session
-        if not is_group:
-            asyncio.create_task(
-                _maybe_away_reply(client, account_id, project_id, chat_entity, chat_id, msg.text, msg_id)
-            )
+        # Away mode: auto-reply to both DMs and groups
+        asyncio.create_task(
+            _maybe_away_reply(client, account_id, project_id, chat_entity, chat_id, msg.text, msg_id, chat_type)
+        )
 
 
 
-async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entity, chat_id: str, message_text: str, msg_id: int):
+async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entity, chat_id: str, message_text: str, msg_id: int, chat_type: str = "dm"):
     from away import is_away_for_chat
     if not is_away_for_chat(project_id, account_id, chat_id):
         return
@@ -156,7 +155,7 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
         system_prompt = build_draft(
             message_text=message_text,
             chat_history=history,
-            chat_type="dm",
+            chat_type=chat_type,
         )
         ai_client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
         response = await ai_client.messages.create(
