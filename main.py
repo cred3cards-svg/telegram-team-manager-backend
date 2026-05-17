@@ -13,13 +13,15 @@ from groups import router as groups_router
 from inbox import router as inbox_router
 from ai import router as ai_router
 from away import router as away_router
+from discovery import router as discovery_router, run_discovery_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    await restore_all_sessions()          # connects + registers handlers
-    asyncio.create_task(keepalive_all_sessions())  # keeps them alive forever
+    await restore_all_sessions()
+    asyncio.create_task(keepalive_all_sessions())
+    asyncio.create_task(run_discovery_loop())
 
     yield
 
@@ -39,6 +41,7 @@ app.include_router(groups_router)
 app.include_router(inbox_router)
 app.include_router(ai_router)
 app.include_router(away_router)
+app.include_router(discovery_router)
 
 
 @app.get("/health")
