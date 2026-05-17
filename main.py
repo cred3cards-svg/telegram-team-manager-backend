@@ -8,32 +8,18 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from database import init_db
-from accounts import router as accounts_router, restore_all_sessions, keepalive_all_sessions, _sync_dialogs, _clients
+from accounts import router as accounts_router, restore_all_sessions, keepalive_all_sessions
 from groups import router as groups_router
-from inbox import router as inbox_router, register_event_handlers
+from inbox import router as inbox_router
 from ai import router as ai_router
 from away import router as away_router
-from database import get_conn, rows_to_list
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    await restore_all_sessions()
-
-    # Register event handlers + sync dialogs for all active accounts
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT a.id, a.project_id, a.phone FROM accounts a WHERE a.status='active'"
-        ).fetchall()
-    for r in rows_to_list(rows):
-        await register_event_handlers(r["id"], r["project_id"])
-        client = _clients.get(r["phone"])
-        if client:
-            asyncio.create_task(_sync_dialogs(client, r["id"]))
-
-    # Keep all Telegram sessions alive for the lifetime of the server
-    asyncio.create_task(keepalive_all_sessions())
+    await restore_all_sessions()          # connects + registers handlers
+    asyncio.create_task(keepalive_all_sessions())  # keeps them alive forever
 
     yield
 

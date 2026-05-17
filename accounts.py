@@ -94,19 +94,35 @@ async def keepalive_all_sessions():
 
 
 async def restore_all_sessions():
+    from inbox import register_event_handlers
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, phone, session_string FROM accounts WHERE status='active'"
+            "SELECT id, phone, session_string, project_id FROM accounts WHERE status='active'"
         ).fetchall()
     for r in rows_to_list(rows):
-        if r["session_string"]:
-            try:
-                session = decrypt_session(r["session_string"])
-                client = await get_or_create_client(r["phone"], session)
-                if await client.is_user_authorized():
-                    print(f"[accounts] Restored session for {r['phone']}")
-            except Exception as e:
-                print(f"[accounts] Failed to restore {r['phone']}: {e}")
+        if not r["session_string"]:
+            continue
+        try:
+            session = decrypt_session(r["session_string"])
+            client = await get_or_create_client(r["phone"], session)
+            if await client.is_user_authorized():
+                # Save refreshed session string back to DB
+                fresh = client.session.save()
+                if fresh != session:
+                    with get_conn() as conn:
+                        conn.execute(
+                            "UPDATE accounts SET session_string=? WHERE phone=?",
+                            (encrypt_session(fresh), r["phone"]),
+                        )
+                await register_event_handlers(r["id"], r["project_id"])
+                asyncio.create_task(_sync_dialogs(client, r["id"]))
+                print(f"[startup] Restored {r['phone']}")
+            else:
+                print(f"[startup] Session invalid for {r['phone']} — needs re-login")
+                with get_conn() as conn:
+                    conn.execute("UPDATE accounts SET status='pending' WHERE phone=?", (r["phone"],))
+        except Exception as e:
+            print(f"[startup] Failed to restore {r['phone']}: {e}")
 
 
 async def _sync_dialogs(client: TelegramClient, account_id: int):
