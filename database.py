@@ -164,6 +164,9 @@ def init_db():
     except Exception as e:
         print(f"[db] seed warning: {e}")
 
+    # Add new columns to existing tables (safe to re-run)
+    _migrate_columns()
+
     # Backfill project_groups from existing chats so old joins aren't lost
     _backfill_project_groups()
 
@@ -174,6 +177,21 @@ def init_db():
             print(f"[db] init complete — {n} accounts in database")
     except Exception as e:
         print(f"[db] count check failed: {e}")
+
+
+def _migrate_columns():
+    """Add new columns introduced after initial deploy. Safe to re-run — errors are suppressed."""
+    migrations = [
+        "ALTER TABLE projects ADD COLUMN system_prompt TEXT DEFAULT ''",
+        "ALTER TABLE chats ADD COLUMN write_restricted INTEGER DEFAULT 0",
+        "ALTER TABLE project_groups ADD COLUMN write_restricted INTEGER DEFAULT 0",
+    ]
+    for sql in migrations:
+        try:
+            with get_conn() as conn:
+                conn.execute(sql)
+        except Exception:
+            pass  # column already exists — fine
 
 
 def _backfill_project_groups():

@@ -451,6 +451,17 @@ async def update_persona(account_id: int, req: PersonaRequest):
     return row_to_dict(row)
 
 
+@router.put("/accounts/{account_id}/project")
+async def reassign_account_project(account_id: int, project_id: int):
+    """Move an account to a different project. Next incoming message uses the new project's prompt."""
+    with get_conn() as conn:
+        conn.execute("UPDATE accounts SET project_id=? WHERE id=?", (project_id, account_id))
+        row = conn.execute("SELECT * FROM accounts WHERE id=?", (account_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Account not found")
+    return _scrub(row_to_dict(row))
+
+
 @router.post("/accounts/sync/{account_id}")
 async def sync_account_dialogs(account_id: int):
     client = await get_client_for_account(account_id)

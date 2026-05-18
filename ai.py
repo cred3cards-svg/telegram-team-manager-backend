@@ -126,9 +126,25 @@ async def build_system_prompt(
     chat_history: list,
     message_text: str,
     chat_name: str = "",
+    project_system_prompt: str = "",
 ) -> str:
     cricket_context = await build_cricket_context()
     history_str = "\n".join(chat_history[-3:])
+
+    # ── Custom project prompt overrides everything ────────────────────────────
+    if project_system_prompt and project_system_prompt.strip():
+        return f"""{project_system_prompt.strip()}
+
+LIVE CRICKET DATA (use when relevant):
+{cricket_context}
+
+Output strictly JSON only:
+{{"draft":"...","plug_used":false,"handle_used":null,"boundary_triggered":false,"suggested_action":"send"}}
+
+chat_type: {chat_type}
+History: {history_str}
+Message: {message_text}
+"""
 
     # ── DM mode: aggressive conversion, plug every reply ──────────────────────
     if chat_type == "dm":
@@ -249,6 +265,7 @@ def build_draft(
     chat_type: str,
     plug_already_used: bool = False,
     chat_name: str = "",
+    project_system_prompt: str = "",
     **kwargs,
 ) -> str:
     """Sync helper used by inbox.py away replies (no live cricket context)."""
@@ -256,6 +273,18 @@ def build_draft(
         f"{m.get('sender', 'User')}: {m.get('text', '')}"
         for m in chat_history[-3:]
     )
+
+    # ── Custom project prompt overrides everything ────────────────────────────
+    if project_system_prompt and project_system_prompt.strip():
+        return f"""{project_system_prompt.strip()}
+
+Output strictly JSON only:
+{{"draft":"...","plug_used":false,"handle_used":null,"boundary_triggered":false,"suggested_action":"send"}}
+
+chat_type: {chat_type}
+History: {history_str or "(no prior messages)"}
+Message: {message_text}
+"""
 
     # ── DM mode: convert aggressively, plug every reply ──────────────────────
     if chat_type == "dm":
@@ -330,6 +359,7 @@ class DraftRequest(BaseModel):
     chat_type: str = "dm"
     chat_name: str = ""
     project_context: str = "General team communication"
+    project_system_prompt: str = ""
     tone: str = "casual"
     message_id: int | None = None
     account_id: int | None = None
@@ -362,6 +392,7 @@ async def generate_draft(req: DraftRequest):
         chat_history=history_strs,
         message_text=req.message_text,
         chat_name=req.chat_name,
+        project_system_prompt=req.project_system_prompt,
     )
 
     try:
@@ -412,18 +443,18 @@ async def list_projects():
 
 
 @router.post("/projects/create")
-async def create_project(name: str, tone: str = "casual", context: str = ""):
+async def create_project(name: str, tone: str = "casual", context: str = "", system_prompt: str = ""):
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO projects (name, tone, context) VALUES (?,?,?)",
-            (name, tone, context),
+            "INSERT INTO projects (name, tone, context, system_prompt) VALUES (?,?,?,?)",
+            (name, tone, context, system_prompt),
         )
         row = conn.execute("SELECT * FROM projects WHERE name=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
     return dict(row)
 
 
 @router.put("/projects/{project_id}")
-async def update_project(project_id: int, name: str = None, tone: str = None, context: str = None):
+async def update_project(project_id: int, name: str = None, tone: str = None, context: str = None, system_prompt: str = None):
     with get_conn() as conn:
         if name:
             conn.execute("UPDATE projects SET name=? WHERE id=?", (name, project_id))
@@ -431,5 +462,7 @@ async def update_project(project_id: int, name: str = None, tone: str = None, co
             conn.execute("UPDATE projects SET tone=? WHERE id=?", (tone, project_id))
         if context is not None:
             conn.execute("UPDATE projects SET context=? WHERE id=?", (context, project_id))
+        if system_prompt is not None:
+            conn.execute("UPDATE projects SET system_prompt=? WHERE id=?", (system_prompt, project_id))
         row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     return dict(row)

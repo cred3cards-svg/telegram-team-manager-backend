@@ -91,7 +91,12 @@ async def register_event_handlers(account_id: int, project_id: int):
         chat_name = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "Unknown")
         sender_name = getattr(sender_entity, "first_name", None) or getattr(sender_entity, "username", "Unknown")
 
-        # For groups, only store if monitored
+        # Look up current project_id live — supports re-assigning accounts to projects
+        with get_conn() as conn:
+            acc_row = conn.execute("SELECT project_id FROM accounts WHERE id=?", (account_id,)).fetchone()
+        current_project_id = acc_row["project_id"] if acc_row else project_id
+
+        # For groups, only store if monitored; skip write-restricted groups for replies
         with get_conn() as conn:
             existing_chat = conn.execute(
                 "SELECT * FROM chats WHERE account_id=? AND chat_id=?", (account_id, chat_id)
@@ -103,7 +108,7 @@ async def register_event_handlers(account_id: int, project_id: int):
             chat_row = _upsert_chat(conn, account_id, chat_id, chat_name, chat_type, msg.text[:100])
             msg_id = _insert_message(conn, chat_row["id"], sender_name, msg.text, False)
 
-        await _broadcast(project_id, {
+        await _broadcast(current_project_id, {
             "type": "new_message",
             "account_id": account_id,
             "chat_id": chat_id,
@@ -117,7 +122,7 @@ async def register_event_handlers(account_id: int, project_id: int):
 
         # Away mode: auto-reply to both DMs and groups
         asyncio.create_task(
-            _maybe_away_reply(client, account_id, project_id, chat_entity, chat_id, msg.text, msg_id, chat_type)
+            _maybe_away_reply(client, account_id, current_project_id, chat_entity, chat_id, msg.text, msg_id, chat_type)
         )
 
 
@@ -127,7 +132,6 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
     if not is_away_for_chat(project_id, account_id, chat_id):
         return
 
-    # Only auto-reply once per chat per away session — check last outgoing message time vs away_until
     with get_conn() as conn:
         away_row = conn.execute("SELECT enabled_at FROM away_sessions WHERE project_id=?", (project_id,)).fetchone()
         if not away_row:
@@ -136,6 +140,11 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
 
         chat_row = conn.execute("SELECT * FROM chats WHERE account_id=? AND chat_id=?", (account_id, chat_id)).fetchone()
         if not chat_row:
+            return
+
+        # Skip write-restricted groups — we already know we can't send there
+        if chat_row.get("write_restricted") or (chat_type == "group" and chat_row.get("write_restricted")):
+            print(f"[away] Skipping write-restricted chat {chat_id}")
             return
 
         # Cap auto-replies at 10 per chat per away session
@@ -162,7 +171,7 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
     # Resolve chat name early so it's available for the AI prompt
     chat_name_str = getattr(chat_entity, "title", None) or getattr(chat_entity, "first_name", "") or chat_id
 
-    # Fetch project context for AI
+    # Fetch project context + custom system prompt
     with get_conn() as conn:
         project = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         recent_msgs = conn.execute(
@@ -173,7 +182,7 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
     project = dict(project) if project else {}
     history = [{"sender": r["sender"], "text": r["text"]} for r in reversed(recent_msgs)]
 
-    # Generate AI draft using shared build_draft() so persona is respected
+    # Generate AI draft — uses project's custom prompt if set, else OnlyWin default
     try:
         from ai import build_draft, parse_ai_response
         system_prompt = build_draft(
@@ -181,6 +190,7 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
             chat_history=history,
             chat_type=chat_type,
             chat_name=chat_name_str,
+            project_system_prompt=project.get("system_prompt", ""),
         )
         ai_client = anthropic.AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
         response = await ai_client.messages.create(
@@ -199,11 +209,24 @@ async def _maybe_away_reply(client, account_id: int, project_id: int, chat_entit
     if not draft_text:
         return
 
-    # Send the reply
+    # Send the reply — detect and flag write-restricted groups
     try:
         await client.send_message(chat_entity, draft_text)
     except Exception as e:
-        print(f"[away] Send failed: {e}")
+        err = str(e).lower()
+        if any(x in err for x in ["write", "forbidden", "banned", "restrict", "right", "permission", "not allowed"]):
+            print(f"[away] Write-restricted in {chat_id} — flagging, no future replies")
+            with get_conn() as conn:
+                conn.execute(
+                    "UPDATE chats SET write_restricted=1 WHERE account_id=? AND chat_id=?",
+                    (account_id, chat_id),
+                )
+                conn.execute(
+                    "UPDATE project_groups SET write_restricted=1 WHERE group_id=?",
+                    (chat_id,),
+                )
+        else:
+            print(f"[away] Send failed: {e}")
         return
 
     # Store as outgoing message, log the away reply

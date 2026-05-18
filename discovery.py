@@ -94,11 +94,46 @@ def _categorise(name: str, description: str) -> str:
 
 # ── Core discovery logic ──────────────────────────────────────────────────────
 
-async def _discover_for_client(client, phone: str):
+def _dynamic_keywords(account_id: int) -> list:
+    """Merge base KEYWORDS with words from already-joined group names for targeted search."""
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT chat_name FROM chats WHERE account_id=? AND type='group' LIMIT 60",
+                (account_id,)
+            ).fetchall()
+        stop = {"the", "and", "for", "chat", "group", "india", "indian", "with", "your",
+                "this", "that", "from", "have", "only", "like", "more", "will", "into"}
+        extra = set()
+        for r in rows:
+            for word in r["chat_name"].lower().split():
+                if len(word) > 3 and word not in stop:
+                    extra.add(word)
+        combined = list(set(KEYWORDS + list(extra)))
+        return combined[:40]
+    except Exception:
+        return KEYWORDS
+
+
+def _already_joined_ids(account_id: int) -> set:
+    """Return chat_ids already joined by this account so we don't re-suggest them."""
+    try:
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT chat_id FROM chats WHERE account_id=? AND type='group'", (account_id,)
+            ).fetchall()
+        return {r["chat_id"] for r in rows}
+    except Exception:
+        return set()
+
+
+async def _discover_for_client(client, phone: str, account_id: int = 0):
     seen_ids: set[str] = set()
     found = []
+    keywords = _dynamic_keywords(account_id)
+    already_joined = _already_joined_ids(account_id)
 
-    for keyword in KEYWORDS:
+    for keyword in keywords:
         try:
             result = await client(SearchRequest(q=keyword, limit=50))
             for chat in result.chats:
@@ -113,7 +148,7 @@ async def _discover_for_client(client, phone: str):
                 if members < MIN_MEMBERS:
                     continue
                 gid = str(chat.id)
-                if gid in seen_ids:
+                if gid in seen_ids or gid in already_joined:
                     continue
                 seen_ids.add(gid)
                 found.append(chat)
@@ -181,6 +216,7 @@ async def run_discovery_loop():
                 "SELECT id, phone FROM accounts WHERE status='active'"
             ).fetchall()
 
+
         for r in rows:
             phone = r["phone"]
             now = time.time()
@@ -191,7 +227,7 @@ async def run_discovery_loop():
                 continue
             _last_run[phone] = now
             print(f"[discovery] Starting group discovery for {phone}...")
-            asyncio.create_task(_discover_for_client(client, phone))
+            asyncio.create_task(_discover_for_client(client, phone, r["id"]))
 
         await asyncio.sleep(3600)   # check every hour, run every 6h per account
 
@@ -275,5 +311,5 @@ async def trigger_discovery_now(account_id: int):
         row = conn.execute("SELECT phone FROM accounts WHERE id=?", (account_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Account not found")
-    asyncio.create_task(_discover_for_client(client, row["phone"]))
+    asyncio.create_task(_discover_for_client(client, row["phone"], account_id))
     return {"status": "discovery started"}
